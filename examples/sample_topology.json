@@ -1,0 +1,31 @@
+{
+  "meta": {
+    "baseMVA": 100.0,
+    "feeder": "Feeder-A"
+  },
+  "nodes": [
+    { "id": "bus-1", "type": "Bus", "name": "Slack", "kv": 11.0, "is_slack": true },
+    { "id": "bus-2", "type": "Bus", "name": "Load Bus", "kv": 11.0 },
+    { "id": "load-1", "type": "Load", "name": "Load", "bus": "bus-2", "p_kw": 800, "q_kvar": 200 },
+    { "id": "grid-1", "type": "Gen", "name": "Slack Source", "bus": "bus-1", "p_kw": 600, "p_max_kw": 2000, "p_min_kw": 0, "q_kvar": 100, "q_max_kvar": 500 },
+    { "id": "dg-1", "type": "DG", "name": "DG", "bus": "bus-2", "p_kw": 300, "p_max_kw": 500, "p_min_kw": 0, "q_kvar": 0, "q_max_kvar": 200 }
+  ],
+  "links": [
+    {
+      "id": "line-1",
+      "type": "Line",
+      "from": "bus-1",
+      "to": "bus-2",
+      "r_ohm": 0.12,
+      "x_ohm": 0.36,
+      "rate_mva": 10
+    },
+    {
+      "id": "sw-1",
+      "type": "Switch",
+      "from": "bus-1",
+      "to": "bus-2",
+      "status": "OPEN"
+    }
+  ]
+}
