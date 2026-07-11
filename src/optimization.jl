@@ -5,6 +5,7 @@ using Juniper
 using HiGHS
 using Ipopt
 using Logging: @debug
+import Graphs
 import MathOptInterface as MOI
 
 import ..Errors: TopologyError
@@ -48,7 +49,8 @@ function default_reconfiguration_optimizer()
         Juniper.Optimizer,
         "nl_solver" => nl,
         "mip_solver" => mip,
-        "log_levels" => Dict("juniper" => 0, "mip" => 0, "nlp" => 0),
+        "log_levels" => Symbol[],
+        "time_limit" => 300.0,
     )
 end
 
@@ -63,7 +65,7 @@ function execute_reconfiguration(pm_data::Dict; optimizer=default_reconfiguratio
 
     termination = termination_status(model)
     if termination ∉ (MOI.OPTIMAL, MOI.LOCALLY_SOLVED)
-        throw(TopologyError("reconfiguration optimizer failed: " * String(termination)))
+        throw(TopologyError("reconfiguration optimizer failed: " * string(termination)))
     end
 
     if !has_values(model)
@@ -111,12 +113,13 @@ function build_dataset(pm_data)
     vm_sq = Dict(k => (buses[k]["vm"])^2 for k in bus_keys)
     slack_buses = [k for k in bus_keys if buses[k]["type"] == 3]
 
+    # pm_data comes out of convert_topology already per-unit, so no /base_mva here.
     load_pd = Dict(k => 0.0 for k in bus_keys)
     load_qd = Dict(k => 0.0 for k in bus_keys)
     for load in values(pm_data["load"])
         bus = load["load_bus"]
-        load_pd[bus] += load["pd"] / base_mva
-        load_qd[bus] += load["qd"] / base_mva
+        load_pd[bus] += load["pd"]
+        load_qd[bus] += load["qd"]
     end
 
     gens = Dict{String,GenData}()
@@ -128,12 +131,12 @@ function build_dataset(pm_data)
             key,
             bus,
             gen["name"],
-            gen["pmin"] / base_mva,
-            gen["pmax"] / base_mva,
-            gen["qmin"] / base_mva,
-            gen["qmax"] / base_mva,
-            gen["pg"] / base_mva,
-            gen["qg"] / base_mva,
+            gen["pmin"],
+            gen["pmax"],
+            gen["qmin"],
+            gen["qmax"],
+            gen["pg"],
+            gen["qg"],
             gen["status"],
         )
         gens[key] = info
@@ -146,11 +149,11 @@ function build_dataset(pm_data)
 
     for idx in branch_keys
         branch = pm_data["branch"][string(idx)]
-        rate_mva = max(get(branch, "rate_a", base_mva), 0.0)
-        rate_pu = rate_mva > 0 ? rate_mva / base_mva : DEFAULT_BIGM_FLOW
+        rate_pu = max(get(branch, "rate_a", 1.0), 0.0)
+        rate_pu = rate_pu > 0 ? rate_pu : DEFAULT_BIGM_FLOW
         rate_sq = rate_pu^2
         device = lowercase(String(get(branch, "device_type", branch["name"])))
-        switchable = occursin("switch", device)
+        switchable = Bool(get(branch, "switchable", occursin("switch", device)))
         status = branch["status"]
         data = BranchData(
             string(idx),
@@ -168,6 +171,24 @@ function build_dataset(pm_data)
         branches[idx] = data
         push!(outgoing[data.f_bus], idx)
         push!(incoming[data.t_bus], idx)
+    end
+
+    # A radial network is a spanning tree: n-1 closed branches, no loops. Non-switchable
+    # branches keep their status, so any loop among the fixed-closed ones makes the MINLP
+    # infeasible before it is even built — fail fast with an actionable message instead
+    # of letting Juniper time out on a structurally impossible problem.
+    bus_pos = Dict(b => i for (i, b) in enumerate(bus_keys))
+    fixed_graph = Graphs.SimpleGraph(length(bus_keys))
+    for data in values(branches)
+        (data.switchable || data.status != 1) && continue
+        u = bus_pos[data.f_bus]
+        v = bus_pos[data.t_bus]
+        if u == v || !Graphs.add_edge!(fixed_graph, u, v)
+            throw(TopologyError("non-switchable closed branch $(data.name) duplicates an existing connection; mark one of the parallel branches as switchable"))
+        end
+    end
+    if Graphs.is_cyclic(fixed_graph)
+        throw(TopologyError("non-switchable closed branches form a loop; radial reconfiguration is infeasible unless some of them are marked switchable"))
     end
 
     big_v = maximum(values(vmax_sq)) - minimum(values(vmin_sq)) + 0.5
@@ -228,12 +249,12 @@ function build_dataset(pm_data)
     for b in bus_keys
         outgoing_indices = outgoing[b]
         incoming_indices = incoming[b]
-        pg_terms = sum(pg[key] for key in bus_gens[b])
-        qg_terms = sum(qg[key] for key in bus_gens[b])
-        @constraint(model, sum(p[idx] for idx in outgoing_indices) - sum(p[idx] for idx in incoming_indices) + pg_terms - load_pd[b] == 0)
-        @constraint(model, sum(q[idx] for idx in outgoing_indices) - sum(q[idx] for idx in incoming_indices) + qg_terms - load_qd[b] == 0)
+        pg_terms = sum((pg[key] for key in bus_gens[b]); init=0.0)
+        qg_terms = sum((qg[key] for key in bus_gens[b]); init=0.0)
+        @constraint(model, sum((p[idx] for idx in outgoing_indices); init=0.0) - sum((p[idx] for idx in incoming_indices); init=0.0) + pg_terms - load_pd[b] == 0)
+        @constraint(model, sum((q[idx] for idx in outgoing_indices); init=0.0) - sum((q[idx] for idx in incoming_indices); init=0.0) + qg_terms - load_qd[b] == 0)
 
-        flow_balance = sum(flow[idx] for idx in outgoing_indices) - sum(flow[idx] for idx in incoming_indices)
+        flow_balance = sum((flow[idx] for idx in outgoing_indices); init=0.0) - sum((flow[idx] for idx in incoming_indices); init=0.0)
         if b == root_bus
             @constraint(model, flow_balance == required_closed)
         else
@@ -285,13 +306,16 @@ function apply_solution(pm_data, dataset, z_val, pg_val, qg_val)
     for idx in dataset.branch_keys
         data = dataset.branches[idx]
         status = data.switchable ? (z_val[idx] >= 0.5 ? 1 : 0) : data.status
+        # PowerModels filters branches on "br_status" only; "status" is kept for our own
+        # payload/reporting layer. Both must stay in sync or the verification power flow
+        # silently runs on the pre-optimization topology.
         updated["branch"][data.key]["status"] = status
+        updated["branch"][data.key]["br_status"] = status
     end
 
     for key in dataset.gen_keys
-        info = dataset.gens[key]
-        updated["gen"][key]["pg"] = pg_val[key] * dataset.base_mva
-        updated["gen"][key]["qg"] = qg_val[key] * dataset.base_mva
+        updated["gen"][key]["pg"] = pg_val[key]
+        updated["gen"][key]["qg"] = qg_val[key]
     end
 
     return updated
@@ -300,7 +324,9 @@ end
 function collect_switch_status(pm_data)
     states = Vector{Dict{String,Any}}()
     for branch in values(pm_data["branch"])
-        if occursin("switch", lowercase(String(get(branch, "device_type", branch["name"]))))
+        device = lowercase(String(get(branch, "device_type", branch["name"])))
+        switchable = Bool(get(branch, "switchable", occursin("switch", device)))
+        if switchable
             status = branch["status"] == 1 ? "CLOSED" : "OPEN"
             push!(states, Dict("id" => branch["name"], "status" => status))
         end
@@ -310,14 +336,15 @@ end
 
 function collect_dg_dispatch(pm_data, solution)
     result = solution.result
+    base_mva = pm_data["baseMVA"]
     solution_gen = get(get(result, "solution", Dict()), "gen", Dict())
     dispatch = Vector{Dict{String,Any}}()
-    for (key, gen) in sort(collect(pm_data["gen"]))
+    for (key, gen) in sort(collect(pm_data["gen"]); by=first)
         sol = get(solution_gen, key, Dict())
         push!(dispatch, Dict(
             "id" => gen["name"],
-            "p_mw" => get(sol, "pg", gen["pg"]),
-            "q_mvar" => get(sol, "qg", gen["qg"]),
+            "p_mw" => get(sol, "pg", gen["pg"]) * base_mva,
+            "q_mvar" => get(sol, "qg", gen["qg"]) * base_mva,
         ))
     end
     return dispatch
@@ -333,4 +360,4 @@ end
 
 end
 
-using .Optimization: execute_reconfiguration, default_reconfiguration_optimizer
+using .Optimization: execute_reconfiguration

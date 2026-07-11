@@ -44,13 +44,22 @@ wrap_success(result_type::AbstractString, payload) = JSON3.write(Dict(
     "data" => payload,
 ))
 
+error_code(::ValidationError) = "VALIDATION_ERROR"
+error_code(::TopologyError) = "TOPOLOGY_ERROR"
+error_code(::SnapshotError) = "SNAPSHOT_ERROR"
+error_code(::Exception) = "INTERNAL_ERROR"
+
 function wrap_error(err)
-    msg = sprint(showerror, err)
-    return JSON3.write(Dict(
+    payload = Dict{String,Any}(
         "status" => "error",
-        "message" => msg,
+        "code" => error_code(err),
+        "message" => sprint(showerror, err),
         "data" => nothing,
-    ))
+    )
+    if err isa ValidationError && !isempty(err.path)
+        payload["path"] = err.path
+    end
+    return JSON3.write(payload)
 end
 
 end

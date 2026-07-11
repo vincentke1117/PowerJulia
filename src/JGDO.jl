@@ -1,6 +1,6 @@
 module JGDO
 
-export run_pf, run_reconfiguration_dg, topology_to_powermodels, write_run_snapshot, register_callbacks, default_optimizer, default_reconfiguration_optimizer
+export run_pf, run_reconfiguration_dg, topology_to_powermodels, write_run_snapshot, default_optimizer, default_reconfiguration_optimizer
 
 using JSON3
 using Dates
@@ -21,13 +21,15 @@ Runs an AC power flow using the provided topology JSON payload. Returns a JSON s
 that matches the front-end contract specified in the PRD.
 """
 function run_pf(topo_json::AbstractString; optimizer=default_optimizer())
-    request = JSON3.read(topo_json)
-    pm_data = topology_to_powermodels(request)
-    result = execute_power_flow(pm_data; optimizer)
-    payload = build_pf_payload(result)
-    return wrap_success("AC power flow completed", payload)
-catch err
-    return wrap_error(err)
+    try
+        request = JSON3.read(topo_json, Dict{String,Any})
+        pm_data = topology_to_powermodels(request)
+        result = execute_power_flow(pm_data; optimizer)
+        payload = build_pf_payload(result)
+        return wrap_success("AC power flow completed", payload)
+    catch err
+        return wrap_error(err)
+    end
 end
 
 """
@@ -37,12 +39,14 @@ Runs the reconfiguration + DG optimization workflow defined in the PRD. Returns 
 string that conforms to the unified front-end response schema.
 """
 function run_reconfiguration_dg(topo_json::AbstractString; optimizer=default_reconfiguration_optimizer(), pf_optimizer=default_optimizer())
-    request = JSON3.read(topo_json)
-    pm_data = topology_to_powermodels(request)
-    payload = execute_reconfiguration(pm_data; optimizer=optimizer, pf_optimizer=pf_optimizer)
-    return wrap_success("Topology reconfiguration completed", payload)
-catch err
-    return wrap_error(err)
+    try
+        request = JSON3.read(topo_json, Dict{String,Any})
+        pm_data = topology_to_powermodels(request)
+        payload = execute_reconfiguration(pm_data; optimizer=optimizer, pf_optimizer=pf_optimizer)
+        return wrap_success("Topology reconfiguration completed", payload)
+    catch err
+        return wrap_error(err)
+    end
 end
 
 """
@@ -81,7 +85,5 @@ function write_run_snapshot(data::AbstractDict; runs_dir=DEFAULT_RUNS_DIR)
 
     return path
 end
-
-include("bridge.jl")
 
 end # module

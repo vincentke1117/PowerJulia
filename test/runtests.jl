@@ -5,6 +5,8 @@ using JGDO
 using JGDO: TopologyError, ValidationError, SnapshotError, topology_to_powermodels, build_pf_payload, write_run_snapshot
 using JGDO.Optimization
 
+const EXAMPLES_DIR = joinpath(@__DIR__, "..", "examples")
+
 function base_topology()
     return Dict(
         "meta" => Dict(
@@ -27,39 +29,67 @@ function base_topology()
     )
 end
 
-@testset "Topology conversion" begin
+@testset "Topology conversion (per-unit)" begin
     topo = base_topology()
     pm = topology_to_powermodels(topo)
 
     @test pm["baseMVA"] == 100.0
+    @test pm["per_unit"] === true
     @test length(pm["bus"]) == 3
+    @test isempty(pm["storage"])
+    @test isempty(pm["switch"])
+    @test isempty(pm["dcline"])
 
     @test pm["bus"]["1"]["name"] == "bus-1"
-    @test pm["bus"]["1"]["type"] == 3
-    @test pm["bus"]["2"]["name"] == "bus-2"
+    @test pm["bus"]["1"]["bus_type"] == 3
+    @test pm["bus"]["3"]["bus_type"] == 2
+    # va is stored in radians after make_per_unit!
+    @test isapprox(pm["bus"]["2"]["va"], deg2rad(-0.5); atol=1e-9)
 
+    # 800 kW → 0.8 MW → 0.008 pu on a 100 MVA base
     load = only(values(pm["load"]))
     @test load["load_bus"] == 2
-    @test isapprox(load["pd"], 0.8; atol=1e-6)
-    @test isapprox(load["qd"], 0.2; atol=1e-6)
+    @test isapprox(load["pd"], 0.008; atol=1e-9)
+    @test isapprox(load["qd"], 0.002; atol=1e-9)
 
     @test length(pm["gen"]) == 2
     slack_gen = pm["gen"]["1"]
     dg = pm["gen"]["2"]
     @test slack_gen["gen_bus"] == 1
+    @test isapprox(slack_gen["pg"], 0.006; atol=1e-9)
+    @test isapprox(slack_gen["qmax"], 0.005; atol=1e-9)
     @test dg["gen_bus"] == 3
-    @test isapprox(dg["pg"], 0.5; atol=1e-6)
-    @test dg["status"] == 1
+    @test isapprox(dg["pg"], 0.005; atol=1e-9)
+    # q_max_kvar unspecified for dg-1 → defaults to |q_kvar| = 50 kvar = 0.0005 pu
+    # (regression guard for the old double /1000 bug that produced 5e-7)
+    @test isapprox(dg["qmax"], 0.0005; atol=1e-9)
+    @test isapprox(dg["qmin"], -0.0005; atol=1e-9)
 
     branches = collect(values(pm["branch"]))
     line12 = only(filter(b -> b["name"] == "line-12", branches))
-    z_base = (pm["bus"]["1"]["base_kv"]^2) / pm["baseMVA"]
-    @test isapprox(line12["br_r"], 0.2 / z_base; atol=1e-6)
-    @test line12["status"] == 1
+    z_base = (12.66^2) / 100.0
+    @test isapprox(line12["br_r"], 0.2 / z_base; atol=1e-9)
+    @test isapprox(line12["rate_a"], 0.05; atol=1e-9)
+    @test line12["br_status"] == 1
+    @test line12["switchable"] == false
+    @test isapprox(line12["angmax"], deg2rad(60.0); atol=1e-9)
 
     switch13 = only(filter(b -> b["name"] == "sw-13", branches))
+    @test switch13["br_status"] == 0
     @test switch13["status"] == 0
     @test switch13["device_type"] == "switch"
+    @test switch13["switchable"] == true
+end
+
+@testset "Topology conversion from JSON3 object" begin
+    topo = JSON3.read(JSON3.write(base_topology()))
+    pm = topology_to_powermodels(topo)
+
+    @test pm["baseMVA"] == 100.0
+    @test pm["per_unit"] === true
+    @test pm["bus"]["1"]["bus_type"] == 3
+    @test pm["bus"]["3"]["bus_type"] == 2
+    @test length(pm["branch"]) == 3
 end
 
 @testset "Topology validation" begin
@@ -77,40 +107,59 @@ end
     @test_throws TopologyError topology_to_powermodels(islanded)
 end
 
-@testset "Power flow payload" begin
-    pm_data = Dict(
-        "bus" => Dict(
-            "1" => Dict("name" => "bus-1", "vm" => 1.0, "va" => 0.0),
-            "2" => Dict("name" => "bus-2", "vm" => 0.99, "va" => -1.2),
-        ),
-        "branch" => Dict(
-            "1" => Dict("name" => "line-12", "rate_a" => 5.0),
-            "2" => Dict("name" => "sw-13", "rate_a" => 0.0),
-        ),
-    )
+@testset "Power flow payload (real solve)" begin
+    pm = topology_to_powermodels(base_topology())
+    solved = JGDO.execute_power_flow(pm)
+    payload = build_pf_payload(solved)
 
-    result = Dict(
-        "solution" => Dict(
-            "bus" => Dict(
-                "1" => Dict("vm" => 0.985, "va" => -0.4),
-                "2" => Dict("vm" => 0.975, "va" => -1.1),
-            ),
-            "branch" => Dict(
-                "1" => Dict("pf" => 0.6, "qf" => 0.2, "pl" => 0.05),
-                "2" => Dict("pf" => 0.0, "qf" => 0.0),
-            ),
-        ),
-        "iterations" => 7,
-    )
-
-    payload = build_pf_payload((pm_data=pm_data, result=result))
     @test payload["status"] == "ok"
     @test payload["type"] == "ac_pf"
-    @test length(payload["buses"]) == 2
-    @test payload["buses"][1]["id"] == "bus-1"
-    @test isapprox(payload["branches"][1]["loading_pct"], sqrt(0.6^2 + 0.2^2) / 5.0 * 100; atol=1e-6)
-    @test isapprox(payload["summary"]["loss_mw"], 0.05; atol=1e-6)
-    @test payload["summary"]["iter"] == 7
+    @test length(payload["buses"]) == 3
+    @test length(payload["branches"]) == 3
+
+    b1 = only(filter(b -> b["id"] == "bus-1", payload["buses"]))
+    @test isapprox(b1["vm_pu"], 1.0; atol=1e-6)
+    b2 = only(filter(b -> b["id"] == "bus-2", payload["buses"]))
+    @test abs(b2["va_deg"]) < 5.0  # degrees, small angle on a lightly loaded feeder
+
+    # bus-2 carries 0.8 MW; dg-1 injects 0.5 MW at bus-3, remainder flows over line-12
+    line12 = only(filter(b -> b["id"] == "line-12", payload["branches"]))
+    @test 0.2 < line12["p_mw"] < 0.5
+    @test line12["status"] == "CLOSED"
+    sw13 = only(filter(b -> b["id"] == "sw-13", payload["branches"]))
+    @test sw13["status"] == "OPEN"
+    @test sw13["p_mw"] == 0.0
+
+    @test payload["summary"]["loss_mw"] > 1.0e-6
+    @test payload["summary"]["loss_mw"] < 0.05
+    @test isempty(payload["summary"]["violation_buses"])
+    @test payload["summary"]["termination_status"] == "LOCALLY_SOLVED"
+end
+
+@testset "IEEE 33-bus golden case (Baran & Wu)" begin
+    topo_json = read(joinpath(EXAMPLES_DIR, "ieee33.json"), String)
+    response = JSON3.read(JGDO.run_pf(topo_json))
+    @test response["status"] == "ok"
+    data = response["data"]
+
+    loss_kw = data["summary"]["loss_mw"] * 1000
+    @test isapprox(loss_kw, 202.68; atol=0.5)       # literature: 202.7 kW
+    vms = [bus["vm_pu"] for bus in data["buses"]]
+    @test isapprox(minimum(vms), 0.9131; atol=1e-3)  # literature: 0.9131 @ bus 18
+    @test data["summary"]["vmin_bus"] == "bus-18"
+
+    # Literature-optimal reconfiguration: open {7, 9, 14, 32, 37}, close the other ties.
+    topo = JSON3.read(topo_json, Dict{String,Any})
+    open_ids = Set(["br-7", "br-9", "br-14", "br-32", "br-37"])
+    for link in topo["links"]
+        link["status"] = link["id"] in open_ids ? "OPEN" : "CLOSED"
+    end
+    response_opt = JSON3.read(JGDO.run_pf(JSON3.write(topo)))
+    @test response_opt["status"] == "ok"
+    loss_opt_kw = response_opt["data"]["summary"]["loss_mw"] * 1000
+    @test isapprox(loss_opt_kw, 139.55; atol=0.5)   # literature: 139.55 kW
+    vms_opt = [bus["vm_pu"] for bus in response_opt["data"]["buses"]]
+    @test isapprox(minimum(vms_opt), 0.9378; atol=1e-3)
 end
 
 @testset "Reconfiguration dataset" begin
@@ -121,6 +170,7 @@ end
     @test length(data.branch_keys) == 3
     @test length(data.gen_keys) == 2
     @test data.branches[3].switchable
+    @test !data.branches[1].switchable
     @test data.gens["1"].bus == 1
     @test data.gens["2"].pmax > data.gens["2"].pmin
     @test data.required_closed == length(data.bus_keys) - 1
@@ -130,6 +180,46 @@ end
     @test length(switches) == 1
     @test switches[1]["id"] == "sw-13"
     @test switches[1]["status"] == "OPEN"
+end
+
+@testset "Radiality precheck" begin
+    topo = base_topology()
+    push!(topo["links"], Dict(
+        "id" => "line-13", "type" => "Line", "from" => "bus-1", "to" => "bus-3",
+        "r_ohm" => 0.1, "x_ohm" => 0.3, "rate_mva" => 5.0, "status" => "CLOSED",
+    ))
+    pm = topology_to_powermodels(topo)
+    # three non-switchable closed lines form a loop → must fail fast, not reach the solver
+    @test_throws TopologyError Optimization.build_dataset(pm)
+end
+
+@testset "Reconfiguration execution (3-bus)" begin
+    response = JSON3.read(JGDO.run_reconfiguration_dg(JSON3.write(base_topology())))
+
+    @test response["status"] == "ok"
+    @test response["data"]["type"] == "reconfiguration_dg"
+    @test length(response["data"]["switch_schedule"]) == 1
+    @test length(response["data"]["dg_dispatch"]) == 2
+end
+
+@testset "Reconfiguration end-to-end (fixture)" begin
+    topo_json = read(joinpath(EXAMPLES_DIR, "reconfiguration_test.json"), String)
+    response = JSON3.read(JGDO.run_reconfiguration_dg(topo_json))
+
+    @test response["status"] == "ok"
+    data = response["data"]
+    @test data["type"] == "reconfiguration_dg"
+    @test !isempty(data["switch_schedule"])
+    @test data["summary"]["loss_before_mw"] > 0
+    @test data["summary"]["loss_after_mw"] < data["summary"]["loss_before_mw"]
+    @test data["summary"]["improvement_pct"] > 0
+end
+
+@testset "Error envelope" begin
+    bad = JSON3.read(JGDO.run_pf("{\"meta\":{},\"nodes\":[],\"links\":[]}"))
+    @test bad["status"] == "error"
+    @test haskey(bad, "code")
+    @test bad["data"] === nothing
 end
 
 @testset "Snapshot persistence" begin

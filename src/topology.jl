@@ -2,6 +2,7 @@ module Topology
 
 using JSON3
 using Graphs
+import PowerModels
 
 import ..Errors: TopologyError, ValidationError
 import ..Types: TopologyData, Node, Link, SWITCH_OPEN, SWITCH_CLOSED, as_switch_status
@@ -118,11 +119,13 @@ function convert_topology(obj::AbstractDict)
             bus_type = 2
         end
         bus = Dict(
+            "index" => idx,
             "bus_i" => idx,
             "name" => node.id,
             "vm" => vm,
             "va" => va,
             "base_kv" => kv,
+            "bus_type" => bus_type,
             "type" => bus_type,
             "vmax" => vmax,
             "vmin" => vmin,
@@ -139,9 +142,11 @@ function convert_topology(obj::AbstractDict)
         ltype = lowercase(node.type)
         if ltype == "load"
             bus_idx = find_bus_for(node, node_lookup, topo.links, bus_map)
+            load_idx = length(loads) + 1
             pd = parse_float(node.data, "p_kw"; path=[node.id]) / 1000
             qd = parse_float(node.data, "q_kvar"; path=[node.id]) / 1000
-            loads[string(length(loads) + 1)] = Dict(
+            loads[string(load_idx)] = Dict(
+                "index" => load_idx,
                 "load_bus" => bus_idx,
                 "pd" => pd,
                 "qd" => qd,
@@ -151,15 +156,19 @@ function convert_topology(obj::AbstractDict)
             )
         elseif ltype in ("gen", "dg")
             bus_idx = find_bus_for(node, node_lookup, topo.links, bus_map)
+            gen_idx = length(gens) + 1
             base_kw = parse_float(node.data, "p_kw"; default=0.0, path=[node.id])
             pmax = parse_float(node.data, "p_max_kw"; default=base_kw, path=[node.id]) / 1000
             pmin = parse_float(node.data, "p_min_kw"; default=0.0, path=[node.id]) / 1000
             pg = base_kw / 1000
-            qg = parse_float(node.data, "q_kvar"; default=0.0, path=[node.id]) / 1000
-            qmax = parse_float(node.data, "q_max_kvar"; default=abs(qg) * 1.0, path=[node.id]) / 1000
-            qmin = parse_float(node.data, "q_min_kvar"; default=-qmax, path=[node.id]) / 1000
+            qg_kvar = parse_float(node.data, "q_kvar"; default=0.0, path=[node.id])
+            qg = qg_kvar / 1000
+            qmax_kvar = parse_float(node.data, "q_max_kvar"; default=abs(qg_kvar), path=[node.id])
+            qmax = qmax_kvar / 1000
+            qmin = parse_float(node.data, "q_min_kvar"; default=-qmax_kvar, path=[node.id]) / 1000
             status = get(node.data, "status", 1)
-            gens[string(length(gens) + 1)] = Dict(
+            gens[string(gen_idx)] = Dict(
+                "index" => gen_idx,
                 "gen_bus" => bus_idx,
                 "pg" => pg,
                 "qg" => qg,
@@ -167,15 +176,20 @@ function convert_topology(obj::AbstractDict)
                 "qmin" => qmin,
                 "pmax" => pmax,
                 "pmin" => pmin,
+                "gen_status" => status,
                 "status" => status,
                 "name" => node.id,
                 "cost" => [0.0, 1.0],
             )
         elseif ltype == "shunt"
             bus_idx = find_bus_for(node, node_lookup, topo.links, bus_map)
-            gs = parse_float(node.data, "g_siemens"; default=0.0, path=[node.id])
-            bs = parse_float(node.data, "b_siemens"; default=0.0, path=[node.id])
-            shunts[string(length(shunts) + 1)] = Dict(
+            shunt_idx = length(shunts) + 1
+            # PowerModels expects shunt gs/bs as MW/MVar consumed at v=1 pu; P = V²·G with V in kV and G in S gives MW.
+            shunt_kv = buses[string(bus_idx)]["base_kv"]
+            gs = parse_float(node.data, "g_siemens"; default=0.0, path=[node.id]) * shunt_kv^2
+            bs = parse_float(node.data, "b_siemens"; default=0.0, path=[node.id]) * shunt_kv^2
+            shunts[string(shunt_idx)] = Dict(
+                "index" => shunt_idx,
                 "shunt_bus" => bus_idx,
                 "gs" => gs,
                 "bs" => bs,
@@ -185,11 +199,20 @@ function convert_topology(obj::AbstractDict)
         end
     end
 
+    for gen in values(gens)
+        bus = buses[string(gen["gen_bus"])]
+        if gen["gen_status"] != 0 && bus["bus_type"] != 3
+            bus["bus_type"] = 2
+            bus["type"] = 2
+        end
+    end
+
     branches = Dict{String,Dict{String,Any}}()
     for link in topo.links
         status = get(link.data, "status", "CLOSED")
         sw_status = as_switch_status(status)
         status_value = sw_status == SWITCH_CLOSED ? 1 : 0
+        branch_idx = length(branches) + 1
         from_bus = get(bus_map, link.from, nothing)
         to_bus = get(bus_map, link.to, nothing)
         if from_bus === nothing || to_bus === nothing
@@ -206,22 +229,32 @@ function convert_topology(obj::AbstractDict)
         z_base = base_impedance(from_kv, base_mva)
         r = r_ohm / z_base
         x = x_ohm / z_base
-        b = to_float(get(link.data, "b_siemens", 0.0))
+        b = to_float(get(link.data, "b_siemens", 0.0)) * z_base
         rate_mva = to_float(get(link.data, "rate_mva", base_mva))
         tap = to_float(get(link.data, "tap", 1.0))
         shift = to_float(get(link.data, "shift_deg", 0.0))
-        branches[string(length(branches) + 1)] = Dict(
+        device_type = lowercase(link.type)
+        switchable_raw = get(link.data, "switchable", occursin("switch", device_type))
+        switchable = switchable_raw isa Bool ? switchable_raw : parse(Bool, lowercase(string(switchable_raw)))
+        branches[string(branch_idx)] = Dict(
+            "index" => branch_idx,
             "f_bus" => from_bus,
             "t_bus" => to_bus,
             "br_r" => r,
             "br_x" => x,
             "br_b" => b,
+            "g_fr" => 0.0,
+            "g_to" => 0.0,
+            "b_fr" => b / 2,
+            "b_to" => b / 2,
             "rate_a" => rate_mva,
             "tap" => tap,
             "shift" => shift,
+            "br_status" => status_value,
             "status" => status_value,
             "name" => link.id,
-            "device_type" => lowercase(get(link.data, "type", link.type)),
+            "device_type" => device_type,
+            "switchable" => switchable,
             "angmin" => -60.0,
             "angmax" => 60.0,
         )
@@ -230,14 +263,23 @@ function convert_topology(obj::AbstractDict)
     slack_indices = ensure_slack(buses)
     ensure_connectivity(buses, branches, slack_indices)
 
-    return Dict(
+    # Everything above is assembled in MATPOWER-style mixed units (MW/MVar/MVA, degrees,
+    # pu impedances). make_per_unit! only converts when per_unit=false, so the flag must
+    # be false here; afterwards the dict is fully per-unit, which is what PowerModels solves in.
+    data = Dict(
         "baseMVA" => base_mva,
+        "per_unit" => false,
         "bus" => buses,
         "load" => loads,
         "gen" => gens,
         "shunt" => shunts,
+        "storage" => Dict{String,Dict{String,Any}}(),
+        "switch" => Dict{String,Dict{String,Any}}(),
         "branch" => branches,
+        "dcline" => Dict{String,Dict{String,Any}}(),
     )
+    PowerModels.make_per_unit!(data)
+    return data
 end
 
 end

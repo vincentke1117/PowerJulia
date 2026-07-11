@@ -1,14 +1,15 @@
 {
   "meta": {
     "baseMVA": 100.0,
-    "feeder": "Feeder-A"
+    "feeder": "Sample-Feeder",
+    "description": "标准配电网样例，用于基础功能测试和演示"
   },
   "nodes": [
-    { "id": "bus-1", "type": "Bus", "name": "Slack", "kv": 11.0, "is_slack": true },
-    { "id": "bus-2", "type": "Bus", "name": "Load Bus", "kv": 11.0 },
-    { "id": "load-1", "type": "Load", "name": "Load", "bus": "bus-2", "p_kw": 800, "q_kvar": 200 },
-    { "id": "grid-1", "type": "Gen", "name": "Slack Source", "bus": "bus-1", "p_kw": 600, "p_max_kw": 2000, "p_min_kw": 0, "q_kvar": 100, "q_max_kvar": 500 },
-    { "id": "dg-1", "type": "DG", "name": "DG", "bus": "bus-2", "p_kw": 300, "p_max_kw": 500, "p_min_kw": 0, "q_kvar": 0, "q_max_kvar": 200 }
+    { "id": "bus-1", "type": "Bus", "name": "平衡节点", "kv": 10.5, "is_slack": true, "vm_pu": 1.0, "va_deg": 0.0 },
+    { "id": "bus-2", "type": "Bus", "name": "负荷节点", "kv": 10.5 },
+    { "id": "load-1", "type": "Load", "name": "配网负荷", "bus": "bus-2", "p_kw": 800, "q_kvar": 200 },
+    { "id": "grid-1", "type": "Gen", "name": "主电源", "bus": "bus-1", "p_kw": 1000, "p_max_kw": 2000, "p_min_kw": 0, "q_kvar": 300, "q_max_kvar": 800, "q_min_kvar": -800, "status": 1 },
+    { "id": "dg-1", "type": "DG", "name": "分布式电源", "bus": "bus-2", "p_kw": 200, "p_max_kw": 300, "p_min_kw": 0, "q_kvar": 50, "q_max_kvar": 150, "q_min_kvar": -150, "status": 1 }
   ],
   "links": [
     {
@@ -16,8 +17,8 @@
       "type": "Line",
       "from": "bus-1",
       "to": "bus-2",
-      "r_ohm": 0.12,
-      "x_ohm": 0.36,
+      "r_ohm": 0.10,
+      "x_ohm": 0.30,
       "rate_mva": 10
     },
     {
@@ -25,7 +26,9 @@
       "type": "Switch",
       "from": "bus-1",
       "to": "bus-2",
-      "status": "OPEN"
+      "status": "CLOSED",
+      "r_ohm": 0.05,
+      "x_ohm": 0.15
     }
   ]
 }

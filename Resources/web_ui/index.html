@@ -4,17 +4,24 @@
     <meta charset="utf-8" />
     <title>Julia-Grid Designer &amp; Optimizer</title>
     <link rel="stylesheet" href="styles.css" />
-    <script src="vendor/go.js"></script>
+    <script src="vendor/joint.min.js"></script>
     <script defer src="app.js"></script>
   </head>
   <body>
     <header class="app-header">
       <h1>Julia-Grid Designer &amp; Optimizer</h1>
       <div class="header-actions">
-        <button id="btn-load-topology">导入 JSON</button>
-        <button id="btn-save-topology">导出 JSON</button>
-        <button id="btn-run-pf" class="primary">运行潮流</button>
-        <button id="btn-run-optimization" class="primary">拓扑重构 + DG 优化</button>
+        <button id="btn-help" title="打开帮助 (F1)">❓ 帮助</button>
+        <button id="btn-legend" title="显示/隐藏图例 (Ctrl+L)">📖 图例</button>
+        <div class="zoom-controls">
+          <button id="btn-zoom-in" title="放大 (Ctrl++)">🔍+</button>
+          <button id="btn-zoom-out" title="缩小 (Ctrl+-)">🔍-</button>
+          <button id="btn-zoom-reset" title="重置缩放 (Ctrl+0)">🔍100%</button>
+        </div>
+        <button id="btn-load-topology" title="导入 JSON (Ctrl+O)">📁 导入</button>
+        <button id="btn-save-topology" title="导出 JSON (Ctrl+S)">💾 导出</button>
+        <button id="btn-run-pf" class="primary" title="运行潮流 (Ctrl+R)">⚡ 潮流</button>
+        <button id="btn-run-optimization" class="primary" title="拓扑重构 + DG 优化">🎯 优化</button>
       </div>
     </header>
     <main class="app-main">
@@ -30,5 +37,120 @@
       </aside>
     </main>
     <input type="file" id="file-input" accept="application/json" hidden />
+
+    <!-- 进度指示器容器 -->
+    <div id="progress-container"></div>
+
+    <!-- 参数编辑对话框 -->
+    <div id="parameter-dialog" class="modal" role="dialog" aria-modal="true" aria-hidden="true">
+      <div class="modal-content">
+        <header class="modal-header">
+          <h2 id="dialog-title">编辑参数</h2>
+          <button class="close-btn" id="dialog-close" aria-label="关闭对话框">&times;</button>
+        </header>
+        <div class="modal-body">
+          <form id="parameter-form">
+            <div class="form-group">
+              <label for="param-name" class="form-label">参数名称</label>
+              <input type="text" id="param-name" class="form-input" readonly />
+              <span class="form-help" id="param-help">参数说明文字</span>
+            </div>
+            <div class="form-group">
+              <label for="param-value" class="form-label">参数值 <span class="required">*</span></label>
+              <input type="number" id="param-value" class="form-input" step="0.01" required />
+              <div class="field-hints">
+                <span class="hint" id="param-min">最小值: -</span>
+                <span class="hint" id="param-max">最大值: -</span>
+                <span class="hint" id="param-unit">单位: -</span>
+              </div>
+              <div class="field-error" id="param-error"></div>
+            </div>
+            <div class="form-group">
+              <label for="param-description" class="form-label">描述</label>
+              <textarea id="param-description" class="form-input" rows="3" readonly></textarea>
+            </div>
+          </form>
+        </div>
+        <footer class="modal-footer">
+          <button type="button" class="btn btn-secondary" id="btn-cancel">取消</button>
+          <button type="button" class="btn btn-primary" id="btn-save">保存</button>
+        </footer>
+      </div>
+    </div>
+
+    <!-- 验证结果对话框 -->
+    <div id="validation-dialog" class="modal" role="dialog" aria-modal="true" aria-hidden="true">
+      <div class="modal-content validation-modal">
+        <header class="modal-header">
+          <h2 id="validation-title">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
+            </svg>
+            数据验证报告
+          </h2>
+          <button class="close-btn" id="validation-close" aria-label="关闭对话框">&times;</button>
+        </header>
+        <div class="modal-body">
+          <div class="validation-summary" id="validation-summary">
+            <!-- 动态生成 -->
+          </div>
+          <div class="validation-content">
+            <div class="validation-section">
+              <div class="validation-section-header">
+                <h3>
+                  <span class="section-icon">❌</span>
+                  错误
+                  <span class="count-badge" id="count-errors">0</span>
+                </h3>
+              </div>
+              <div class="validation-list" id="validation-errors">
+                <!-- 动态生成 -->
+              </div>
+            </div>
+            <div class="validation-section">
+              <div class="validation-section-header">
+                <h3>
+                  <span class="section-icon">⚠️</span>
+                  警告
+                  <span class="count-badge" id="count-warnings">0</span>
+                </h3>
+              </div>
+              <div class="validation-list" id="validation-warnings">
+                <!-- 动态生成 -->
+              </div>
+            </div>
+          </div>
+        </div>
+        <footer class="modal-footer">
+          <button type="button" class="btn btn-secondary" id="validation-cancel">取消</button>
+          <button type="button" class="btn btn-primary" id="validation-continue">继续计算</button>
+        </footer>
+      </div>
+    </div>
+
+    <!-- 图例容器 -->
+    <div id="legend-container"></div>
+
+    <!-- 帮助系统对话框 -->
+    <div id="help-dialog" class="modal" role="dialog" aria-modal="true" aria-hidden="true">
+      <div class="modal-content help-modal">
+        <header class="modal-header">
+          <h2 id="dialog-title">📖 帮助中心</h2>
+          <button class="close-btn" id="help-close" aria-label="关闭帮助">&times;</button>
+        </header>
+        <div class="help-tabs">
+          <button class="help-tab active" data-tab="getting-started">🚀 快速开始</button>
+          <button class="help-tab" data-tab="shortcuts">⌨️ 快捷键</button>
+          <button class="help-tab" data-tab="tutorials">📚 教程</button>
+          <button class="help-tab" data-tab="troubleshooting">🔧 故障排除</button>
+        </div>
+        <div class="help-search">
+          <input type="text" id="help-search" class="form-input" placeholder="搜索帮助内容..." />
+        </div>
+        <div class="modal-body help-content" id="help-content">
+          <!-- 动态生成内容 -->
+        </div>
+      </div>
+    </div>
   </body>
 </html>

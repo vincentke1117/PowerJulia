@@ -1,71 +1,109 @@
-# Julia-Grid Designer & Optimizer (JG-DO)
+# PowerJulia (JGDO)
 
-Julia-Grid Designer & Optimizer 是一个端到端的原型项目，结合 GoJS 前端画布、Blink/Electron 桌面封装与 Julia/PowerModels 计算内核，实现配电网拖拽建模、潮流计算以及“拓扑重构 + 分布式电源优化”流程。本仓库遵循提供的 PRD 规范，关键能力如下：
+可视化配电网设计与分析仿真网站：浏览器里拖拽搭建配电网拓扑，Julia 内核实时计算 **AC 潮流** 与 **网络重构 + 分布式电源联合优化**（目标：网损最小），结果直接着色回画布。
 
-- **拖拽式建模画布**：`Resources/web_ui/` 中的前端代码提供元件库、吸附网格、参数编辑与 JSON 导入导出。
-- **拓扑 JSON 解析**：`src/topology.jl` 将前端拓扑转换成 PowerModels 兼容的数据结构，并执行单位校验、连通性检查与开关状态处理。
-- **潮流计算与优化**：`src/powerflow.jl` 基于 PowerModels/Ipopt 运行 AC 潮流；`src/optimization.jl` 通过 DistFlow 近似构建 Juniper + HiGHS 混合整数模型，内置径向性与流量守恒约束，给出开关重构与 DG 调度方案，并统一返回 JSON 结果。
-- **Blink 桥接**：`src/bridge.jl` 注册前端可调用的 Julia 函数，并在 `runs/` 目录中保存每次求解快照。
-- **示例与脚手架**：`examples/sample_topology.json` 展示前端导出的拓扑结构，`Project.toml` 记录 Julia 依赖。
-- **前端参数校验**：GoJS Inspector 支持按元件类型生成表单、校验数值范围/必填项，并在运行潮流或优化前拦截无效输入。
+- **计算内核**：Julia + PowerModels（AC 潮流，Ipopt）+ JuMP MINLP（DistFlow 二阶锥松弛 + 生成树辐射约束，Juniper/HiGHS/Ipopt）
+- **服务层**：Oxygen.jl 常驻 HTTP 服务（暖请求潮流 ~10ms、33 节点 ~50ms）
+- **前端**：Vite + TypeScript + JointJS 画布（`web/`）
+- **数值金标准**：IEEE 33 节点（Baran & Wu）基线网损 202.68 kW / 文献最优重构 139.55 kW，已纳入测试断言
 
-## 开发环境
+## 快速开始
 
-1. 安装 Julia 1.9 及以上版本，进入仓库执行 `] activate .`。
-2. 使用 `instantiate` 安装依赖。
-   > 重构优化依赖 Juniper（封装 Ipopt + HiGHS），请确保本地环境能够编译/安装对应求解器二进制。
-3. 运行 `using Blink; include("src/JGDO.jl");`，随后可通过 `Blink.Window()` 加载 `Resources/web_ui/index.html` 并调用 `JGDO.register_callbacks(win)` 完成桥接。
-4. 前端资源默认从 `Resources/web_ui/vendor/go.js` 读取 GoJS，请将离线脚本放入该目录。
+```bash
+# 1. 安装 Julia 依赖（首次）
+julia --project=. -e "using Pkg; Pkg.instantiate()"
 
-## 关键 API
+# 2. 构建前端（首次或前端改动后）
+cd web && npm install && npm run build && cd ..
 
-- `JGDO.run_pf(json_string)`：接收前端拓扑 JSON 字符串，返回统一结构的潮流计算结果。
-- `JGDO.run_reconfiguration_dg(json_string; optimizer=JGDO.default_reconfiguration_optimizer())`：执行开关重构 + DG 调度搜索，默认使用 Juniper (Ipopt + HiGHS) 求解 DistFlow MINLP，并输出优化前后损耗对比与调度建议。
-- `JGDO.topology_to_powermodels(dict)`：将解析后的 JSON 字典转为 PowerModels 数据。
-- `JGDO.write_run_snapshot(dict)`：按照 `runs/YYYYMMDD-hhmmss.json` 规则保存求解结果。
+# 3. 启动服务
+julia --project=. scripts/serve.jl
+```
+
+打开 <http://127.0.0.1:8123>。启动到就绪约 20 秒（Julia 包加载），首次计算含 JIT 约 15–30 秒，之后毫秒级。
+
+> 本机若设置了 `http_proxy`，用 curl 调试需加 `--noproxy "*"`。
+
+### 前端开发模式
+
+```bash
+cd web && npm run dev   # Vite 开发服务器，/api 自动代理到 127.0.0.1:8123
+```
+
+## 使用方式
+
+1. **示例算例**：顶栏下拉加载内置算例（含 IEEE 33 节点基准、重构测试网等）。
+2. **手工建模**：左侧元件库点击添加母线/负荷/电源/DG；从元件**连接桩**（小圆点）拖到另一母线成线路，设备拖到母线即挂接；元件本体拖动移动；点击元件在右侧检查器编辑参数（线路/开关类型也在检查器切换）。
+3. **⚡ 潮流计算**：母线按电压着色并标注 vm/va，支路按负载率着色、箭头指示潮流方向。
+4. **🎯 重构优化**：给出开关开合方案与降损百分比，可一键"应用开关方案到画布"后复算潮流验证。
+5. 拓扑支持 JSON 导入/导出；画布草稿自动存入浏览器 localStorage。
+
+## HTTP API
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/pf` | 拓扑 JSON → AC 潮流结果 |
+| POST | `/api/reconfig` | 拓扑 JSON → 重构 + DG 优化结果 |
+| GET | `/api/examples` | 列出内置算例 |
+| GET | `/api/examples/{name}` | 获取算例拓扑 JSON |
+| GET | `/health` | 存活检查 |
+
+统一响应封套：`{status: "ok"|"error", code?, message, path?, data}`。成功的计算自动落盘 `runs/YYYYMMDD-HHMMSS.json` 快照。
+
+## 拓扑 JSON 契约（扁平字段）
+
+```jsonc
+{
+  "meta": { "baseMVA": 100.0, "feeder": "F1" },
+  "nodes": [
+    { "id": "bus-1", "type": "Bus", "kv": 10.5, "is_slack": true, "vm_pu": 1.0,
+      "vmin_pu": 0.95, "vmax_pu": 1.05 },
+    { "id": "load-1", "type": "Load", "bus": "bus-2", "p_kw": 800, "q_kvar": 200 },
+    { "id": "dg-1", "type": "DG", "bus": "bus-3", "p_kw": 200, "p_max_kw": 400,
+      "q_max_kvar": 150, "q_min_kvar": -150, "status": 1 }
+  ],
+  "links": [
+    { "id": "line-1", "type": "Line", "from": "bus-1", "to": "bus-2",
+      "r_ohm": 0.1, "x_ohm": 0.3, "rate_mva": 10 },
+    { "id": "sw-1", "type": "Switch", "from": "bus-2", "to": "bus-3",
+      "r_ohm": 0.001, "x_ohm": 0.003, "status": "OPEN", "switchable": true }
+  ]
+}
+```
+
+要点：电气参数一律放在节点/连线的**顶层**（不要嵌套 `data` 子对象）；设备用 `bus` 字段挂接母线；`switchable` 控制支路是否参与重构（缺省 Switch 为 true、Line 为 false）。单位：kW/kvar/Ω/MVA/kV/度，内核会统一换算为标幺值。
 
 ## 目录结构
 
 ```
-Project.toml
-src/
-  JGDO.jl            # 主模块
-  topology.jl        # 拓扑解析
-  powerflow.jl       # AC 潮流
-  optimization.jl    # 拓扑重构 + DG 优化
-  bridge.jl          # Blink 注册
-Resources/
-  web_ui/
-    index.html
-    app.js
-    styles.css
-    vendor/
-      go.js (待补充)
-examples/
-  sample_topology.json
-runs/
-  .gitkeep
+src/                  Julia 计算内核（JGDO 包）
+  JGDO.jl             主模块：run_pf / run_reconfiguration_dg / write_run_snapshot
+  types.jl            拓扑数据模型（Node/Link/TopologyData）
+  topology.jl         拓扑 JSON → PowerModels 数据（单位换算、连通性校验、per-unit 化）
+  powerflow.jl        AC 潮流 + 支路潮流回算（calc_branch_flow_ac）+ 越限判定
+  optimization.jl     重构 MINLP（DistFlow SOC + 辐射约束 + 辐射可行性预检）
+  errors.jl           领域异常 + 统一响应封套
+scripts/serve.jl      Oxygen HTTP 服务（API + 静态托管 web/dist）
+web/                  前端（Vite + TS + JointJS）
+examples/             内置算例（ieee33.json 为数值金标准）
+test/runtests.jl      测试套件（含 IEEE 33 节点黄金断言）
+runs/                 计算快照
 ```
 
-## 快照与调试
+## 测试
 
-调用 `JGDO.run_pf`/`JGDO.run_reconfiguration_dg` 成功后，返回数据会自动写入 `runs/`。可以通过比较快照 JSON 进行教学或回归验证。
-若快照写入失败，`JGDO.write_run_snapshot` 会抛出 `SnapshotError`，Blink 桥接层会记录告警日志并继续返回原始计算结果，确保前端交互不受影响。
+```bash
+julia --project=. -e "using Pkg; Pkg.test()"
+```
 
-## 打包与分发
+关键断言：33 节点基线网损 202.68±0.5 kW、最低电压 0.9131 pu @ bus-18、文献最优重构 139.55±0.5 kW；重构端到端降损为正；非开关支路成环时快速失败。
 
-项目提供 `scripts/build_app.jl` 作为打包脚本，基于 PackageCompiler `create_app` 生成可分发目录。典型流程如下：
+## 已知边界
 
-1. 安装系统依赖（如 Ipopt 二进制库），确保 `Project.toml` 中的包均能成功编译。
-2. 在仓库根目录执行 `julia scripts/build_app.jl`，默认生成 `build/JGDOApp/`。
-   - 使用 `-o/--output` 可重定向输出目录，`-n/--name` 可修改应用名称。
-   - 若希望保留既有输出，可添加 `--no-force` 以避免覆盖。
-3. 打包脚本会自动复制 `Resources/` 静态资源，并写入 `BUILD_INFO.txt` 记录时间与源目录。
-4. `scripts/precompile_app.jl` 会在打包时执行样例潮流与重构请求，加速首次启动并验证核心管线。
+- 平衡单相等值模型（不含三相不平衡）；短路/谐波计算不在当前范围。
+- 重构 MINLP 由 Juniper（局部求解器）求解，`time_limit` 300 秒，大网络不保证全局最优。
+- 单用户本机/内网使用设计；公网部署需自行加认证与资源限流。
 
-生成目录内的可执行文件可直接启动 Blink 窗口并加载 `Resources/web_ui/index.html`。如需进一步封装为安装程序，可在此目录基础上集成平台特定的打包工具。
+## 路线图
 
-## 后续工作建议
-
-- 丰富优化模型：在当前径向约束基础上探索 N-1 场景、阶段化开关操作或不平衡三相模型，或直接接入 PowerModels/PowerModelsDistribution 现成的重构模型。
-- 结果可视化：结合线路/节点高亮与提示框，呈现潮流与重构决策的空间分布。
+结果导出报告、N-1 校验、时序潮流、变压器支路建模（tap/shift 已预留字段）、更多标准算例（IEEE 69 等）。

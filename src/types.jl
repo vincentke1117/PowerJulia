@@ -49,7 +49,11 @@ end
 function Node(obj)
     id = String(obj["id"])
     type = String(get(obj, "type", "Bus"))
-    data = Dict{String,Any}(pair.first => pair.second for pair in pairs(obj) if pair.first != "id" && pair.first != "type")
+    data = Dict{String,Any}(
+        String(pair.first) => pair.second
+        for pair in pairs(obj)
+        if String(pair.first) != "id" && String(pair.first) != "type"
+    )
     return Node(id, type, data)
 end
 
@@ -58,12 +62,16 @@ function Link(obj)
     from = String(obj["from"])
     to = String(obj["to"])
     type = String(get(obj, "type", "Line"))
-    data = Dict{String,Any}(pair.first => pair.second for pair in pairs(obj) if !(pair.first in ("id", "from", "to", "type")))
+    data = Dict{String,Any}(
+        String(pair.first) => pair.second
+        for pair in pairs(obj)
+        if !(String(pair.first) in ("id", "from", "to", "type"))
+    )
     return Link(id, from, to, type, data)
 end
 
 function TopologyData(obj)
-    meta = Dict{String,Any}(pair.first => pair.second for pair in pairs(get(obj, "meta", Dict{String,Any}())))
+    meta = Dict{String,Any}(String(pair.first) => pair.second for pair in pairs(get(obj, "meta", Dict{String,Any}())))
     nodes = [Node(node) for node in get(obj, "nodes", Any[])]
     links = [Link(link) for link in get(obj, "links", Any[])]
     return TopologyData(meta, nodes, links)
